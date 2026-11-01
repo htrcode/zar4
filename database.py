@@ -752,6 +752,8 @@ class Database:
             await self._audit(actor_id, "invoice.void", "invoice", invoice_id,
                               {"reason": reason, "had_paid": inv["paid"]})
             await self.conn.commit()
+        # Its Sales Statements must leave the sales totals too (the records stay for audit).
+        await self._emit("invoice.void", {"invoice_id": invoice_id, "reason": reason})
         await self._touch(invoice_id=invoice_id)
 
     async def overdue_to_notify(self):
@@ -1238,19 +1240,21 @@ class Database:
 
     # ---------- transactions ----------
     async def add_transaction(self, actor_id, kind, category, amount, description, occurred_on,
-                              company_id=None):
+                              company_id=None, *, voided=False):
+        """Record an income/expense entry; ``voided`` keeps history out of every total."""
         if amount <= 0:
             raise ValueError("Amount must be above zero.")
         cid = await self.category_id(category, kind)
         async with self.lock:
             cur = await self.conn.execute(
                 """INSERT INTO transactions(kind, category_id, company_id, amount, description, occurred_on,
-                   created_by) VALUES (?,?,?,?,?,?,?)""",
-                (kind, cid, (company_id or None), amount, description[:200], occurred_on, actor_id),
+                   created_by, voided) VALUES (?,?,?,?,?,?,?,?)""",
+                (kind, cid, (company_id or None), amount, description[:200], occurred_on,
+                 actor_id, 1 if voided else 0),
             )
             await self._audit(actor_id, f"transaction.{kind}", "transaction", cur.lastrowid,
                               {"category": category, "amount": amount, "date": occurred_on,
-                               "company": company_id})
+                               "company": company_id, "voided": bool(voided)})
             await self.conn.commit()
             return cur.lastrowid
 

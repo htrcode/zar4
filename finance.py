@@ -20,7 +20,8 @@ import config
 import data as store
 import ui
 from desk.bridge import (delete_transaction_record, inspect_transaction, mirror_expense,
-                         mirror_sale, parse_txn_id, post_company, statement_tracker)
+                         mirror_sale, parse_txn_id, post_company, reconcile_sales,
+                         statement_tracker)
 from desk.database import revenue_number
 from desk.utils import duplicate_submission, is_staff, staff_interaction_check, to_cents
 
@@ -235,6 +236,11 @@ class Statements(commands.Cog):
                 log.info("Transaction ids: %s sale(s) numbered, %s registry row(s) added", assigned, added)
         except Exception:
             log.exception("Could not back-fill transaction ids")
+        # Every sale must count in the books (P&L) and every invoice payment on the ledger.
+        try:
+            await reconcile_sales(self.bot)
+        except Exception:
+            log.exception("Could not reconcile sales with the finance books")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Finance data is staff-only (administrators + STAFF_ROLE_IDS).

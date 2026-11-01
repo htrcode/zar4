@@ -352,6 +352,11 @@ def all_payments() -> List[Dict[str, Any]]:
     return list(_load()["payments"])
 
 
+def all_expenses() -> List[Dict[str, Any]]:
+    """Every expense in file order, voided ones included (used by the books reconciliation)."""
+    return list(_load()["expenses"])
+
+
 def ensure_sale_ids() -> int:
     """Write ids for sales recorded before ids existed; returns how many were missing."""
     path = Path(DATA_FILE)

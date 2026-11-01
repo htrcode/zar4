@@ -164,11 +164,14 @@ def sale_from_payment(inv: dict, payment: dict) -> dict:
 
 
 async def post_transaction_event(bot, event: str, payload: dict):
-    """Database event listener: invoice created / payment received."""
-    if event not in ("invoice.created", "payment"):
+    """Database event listener: invoice created / paid / voided."""
+    if event not in ("invoice.created", "payment", "invoice.void"):
         return
     inv = await bot.db.get_invoice(payload["invoice_id"])
     if not inv:
+        return
+    if event == "invoice.void":
+        await void_invoice_sales(bot, inv, payload.get("reason") or "")
         return
     if event == "invoice.created":
         ticket = None
@@ -207,16 +210,22 @@ async def post_transaction_event(bot, event: str, payload: dict):
 # ledger -> SQLite books
 # ---------------------------------------------------------------------------
 async def mirror_sale(bot, sale: dict, actor_id: int):
-    """Make a ledger sale count as income in the SQLite books (dashboard / P&L)."""
+    """Make a ledger sale count as income in the SQLite books (dashboard / P&L).
+
+    Idempotent: a sale that already carries a ``ref`` is linked to an existing finance
+    entry (``tx:`` / ``desk-payment:``) and is never counted a second time. Voided sales
+    are mirrored as voided entries, so they stay in audit history but out of every total.
+    """
     db = getattr(bot, "db", None)
-    if db is None or sale.get("source") == "desk":
-        return
+    if db is None or sale.get("source") in ("desk", "finance") or sale.get("ref"):
+        return None
     try:
         await db.ensure_category("Hosting Revenue", "income")
         text = f"Sale: {sale.get('client_name') or '—'} — {sale.get('service') or 'service'}"
         tx_id = await db.add_transaction(actor_id, "income", "Hosting Revenue", to_cents(sale["amount"]),
                                          text, store._entry_date(sale),
-                                         company_id=sale.get("company") or None)
+                                         company_id=sale.get("company") or None,
+                                         voided=bool(sale.get("voided")))
         # Link the two books so voiding either side cancels the statement entry too.
         if tx_id and sale.get("id"):
             store.set_ref("payment", sale["id"], f"tx:{tx_id}")
@@ -225,17 +234,123 @@ async def mirror_sale(bot, sale: dict, actor_id: int):
         log.exception("Could not mirror the sale into the finance books")
 
 
-async def mirror_expense(bot, expense: dict, actor_id: int):
+async def void_invoice_sales(bot, inv: dict, reason: str = "") -> int:
+    """Void the Sales Statements posted for ``inv``'s payments (records kept for audit)."""
+    reason = (reason or "").strip() or f"Invoice {inv.get('number') or inv.get('id')} was voided"
+    voided = 0
+    refs = {f"desk-payment:{p['id']}" for p in inv.get("payments") or []}
+    if not refs:
+        return 0
+    for sale in store.all_payments():
+        if sale.get("ref") in refs and not sale.get("voided"):
+            try:
+                store.void_entry("payment", sale["id"], reason)
+                voided += 1
+            except ValueError:
+                continue
+    return voided
+
+
+async def reconcile_sales(bot, actor_id: int = 0) -> dict:
+    """Align the statement ledger and the SQLite books on startup.
+
+    Finances live in two places: the JSON statements ledger (what ``/sale`` posts) and
+    the SQLite ``transactions`` books (what the dashboard, P&L, gross sales and the
+    transaction history read). A sale that never reached the books was silently missing
+    from every report, and an invoice payment that never reached the ledger was missing
+    from the Sales Statements. This links both directions once, and is idempotent: the
+    ``ref`` / ``payment_id`` links make a second run add nothing.
+
+    Returns ``{"book_entries", "expense_entries", "ledger_sales", "voided_entries"}``.
+    """
     db = getattr(bot, "db", None)
-    if db is None or expense.get("source") == "finance":
-        return
+    stats = {"book_entries": 0, "expense_entries": 0, "ledger_sales": 0, "voided_entries": 0}
+    if db is None:
+        return stats
+
+    # 1) itemised-invoice payments: make sure each has its income entry and Sales Statement.
+    refs = {str(s.get("ref")) for s in store.all_payments() if s.get("ref")}
+    invoice_ids = [row["invoice_id"] for row in await db.fetchall(
+        "SELECT DISTINCT invoice_id FROM payments ORDER BY invoice_id")]
+    for invoice_id in invoice_ids:
+        inv = await db.get_invoice(invoice_id)
+        if not inv:
+            continue
+        if inv.get("voided"):
+            # A voided invoice must not leave an active Sales Statement in the totals.
+            await void_invoice_sales(bot, inv, f"Invoice {inv['number']} is void")
+            continue
+        adopted: set = set()
+        for payment in inv.get("payments") or []:
+            row = await db.fetchone(
+                "SELECT id FROM transactions WHERE payment_id=?", (payment["id"],))
+            if row is None:
+                await db.add_transaction(
+                    actor_id, "income", inv["category"], payment["amount"],
+                    f"Payment for {inv['number']} ({inv['client_name']})", payment["paid_at"],
+                    company_id=inv.get("company_id"))
+                stats["book_entries"] += 1
+            ref = f"desk-payment:{payment['id']}"
+            if ref in refs:
+                continue
+            # Never duplicate a Sales Statement already recorded without its link. A sale
+            # linked to a *different* payment is not adopted, so equal part-payments do not
+            # collapse into one.
+            existing = next(
+                (s for s in store.all_payments()
+                 if s.get("id") not in adopted
+                 and str(s.get("invoice") or "") == inv["number"]
+                 and abs(float(s.get("amount") or 0) - payment["amount"] / 100) < 0.005
+                 and (not s.get("ref") or s.get("ref") == ref)), None)
+            if existing is not None:
+                adopted.add(existing.get("id"))
+                if not existing.get("ref"):
+                    store.set_ref("payment", existing["id"], ref)
+                    refs.add(ref)
+                continue
+            store.add_payment(**sale_from_payment(inv, payment))
+            refs.add(ref)
+            stats["ledger_sales"] += 1
+
+    # 2) statement-ledger sales: make sure each non-desk sale is in the books. Voided
+    #    ones are kept as voided entries, so they stay in audit history only.
+    for sale in store.all_payments():
+        added = await mirror_sale(bot, sale, actor_id)
+        if added:
+            if sale.get("voided"):
+                stats["voided_entries"] += 1
+            else:
+                stats["book_entries"] += 1
+
+    # 3) the same alignment for expense statements.
+    for expense in store.all_expenses():
+        added = await mirror_expense(bot, expense, actor_id)
+        if added:
+            if expense.get("voided"):
+                stats["voided_entries"] += 1
+            else:
+                stats["expense_entries"] += 1
+
+    if any(stats.values()):
+        log.info("Books reconciliation: %s income, %s expense, %s voided entries, %s ledger sales",
+                 stats["book_entries"], stats["expense_entries"], stats["voided_entries"],
+                 stats["ledger_sales"])
+    return stats
+
+
+async def mirror_expense(bot, expense: dict, actor_id: int):
+    """Make a ledger expense count in the SQLite books; idempotent through ``ref``."""
+    db = getattr(bot, "db", None)
+    if db is None or expense.get("source") == "finance" or expense.get("ref"):
+        return None
     try:
         category = expense.get("category") or "Other Expenses"
         await db.ensure_category(category, "expense")
         text = f"{expense.get('description') or category} — {expense.get('paid_to') or ''}".strip(" —")
         tx_id = await db.add_transaction(actor_id, "expense", category, to_cents(expense["amount"]),
                                          text, str(expense.get("date", ""))[:10],
-                                         company_id=expense.get("company") or None)
+                                         company_id=expense.get("company") or None,
+                                         voided=bool(expense.get("voided")))
         if tx_id and expense.get("id"):
             store.set_ref("expense", expense["id"], f"tx:{tx_id}")
         return tx_id
