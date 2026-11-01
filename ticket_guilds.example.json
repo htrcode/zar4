@@ -1,0 +1,73 @@
+{
+  "_comment": "Copy this file to ticket_guilds.json and replace every value with the real id from YOUR server. Keys are Discord server (guild) ids. A server that is not listed here cannot open or manage tickets. Category keys: tickets, billing, support, partnership, recruitment, active, outdated, followup. The panel_* keys are the wording of that server's public ticket panel (use \\n for line breaks).",
+  "000000000000000000": {
+    "name": "First server",
+    "panel_channel_id": 0,
+    "panel_title": "Need Hosting? Create a Ticket",
+    "panel_description": "Create a ticket and our team will assist you. Our staff will identify your request and route your ticket to the appropriate department.",
+    "panel_button": "Create Ticket",
+    "staff_role_ids": [],
+    "cross_department_role_ids": [],
+    "log_channel_id": 0,
+    "closed_category_id": 0,
+    "prefix": "ticket",
+    "closed_prefix": "closed",
+    "stale_days": 3,
+    "max_open_per_user": 3,
+    "categories": {
+      "tickets": 0,
+      "billing": 0,
+      "support": 0,
+      "partnership": 0,
+      "recruitment": 0,
+      "active": 0,
+      "outdated": 0,
+      "followup": 0
+    },
+    "department_roles": {
+      "tickets": [],
+      "billing": [],
+      "support": [],
+      "partnership": [],
+      "recruitment": [],
+      "active": [],
+      "outdated": [],
+      "followup": []
+    }
+  },
+  "000000000000000001": {
+    "name": "Second server",
+    "panel_channel_id": 0,
+    "panel_title": "Second server support",
+    "panel_description": "Open a ticket here and this server's team will help you.",
+    "panel_button": "Open a ticket",
+    "staff_role_ids": [],
+    "cross_department_role_ids": [],
+    "log_channel_id": 0,
+    "closed_category_id": 0,
+    "prefix": "ticket",
+    "closed_prefix": "closed",
+    "stale_days": 3,
+    "max_open_per_user": 3,
+    "categories": {
+      "tickets": 0,
+      "billing": 0,
+      "support": 0,
+      "partnership": 0,
+      "recruitment": 0,
+      "active": 0,
+      "outdated": 0,
+      "followup": 0
+    },
+    "department_roles": {
+      "tickets": [],
+      "billing": [],
+      "support": [],
+      "partnership": [],
+      "recruitment": [],
+      "active": [],
+      "outdated": [],
+      "followup": []
+    }
+  }
+}
